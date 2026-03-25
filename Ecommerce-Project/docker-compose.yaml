@@ -7,9 +7,9 @@ services:
     ports:
       - "8080:8080"
     environment:
-      MAIL_PASSWORD: esqwzuvixfuhubcg
-      MAIL_USERNAME: priyansh.awasthi@tothenew.com
-      JWT_SECRET: 'DP34ixaersQpNvlC8+0iZ6visPAi7b9SndIeiHo9Yas='
+      MAIL_PASSWORD: ${MAIL_PASSWORD}
+      MAIL_USERNAME: ${MAIL_USERNAME}
+      JWT_SECRET: ${JWT_SECRET}
       SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/Ecommerce
       SPRING_DATASOURCE_USERNAME: root
       SPRING_DATASOURCE_PASSWORD: root
