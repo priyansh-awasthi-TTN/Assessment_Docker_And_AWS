@@ -1,0 +1,38 @@
+version: "3.9"
+
+services:
+  app:
+    build: .
+    container_name: spring-app
+    ports:
+      - "8080:8080"
+    environment:
+      MAIL_PASSWORD: esqwzuvixfuhubcg
+      MAIL_USERNAME: priyansh.awasthi@tothenew.com
+      JWT_SECRET: 'DP34ixaersQpNvlC8+0iZ6visPAi7b9SndIeiHo9Yas='
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/Ecommerce
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: root
+    depends_on:
+      - mysql
+    networks:
+      - internal
+
+  mysql:
+    image: mysql:8.0
+    container_name: mysql-container
+    ports:
+      - "3310:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: Ecommerce
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - internal
+
+volumes:
+  mysql_data:
+
+networks:
+  internal:
