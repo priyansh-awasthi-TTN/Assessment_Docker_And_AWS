@@ -1,26 +1,42 @@
 version: "3.9"
 
 services:
+  localstack:
+    image: localstack/localstack-pro
+    container_name: localstack
+    ports:
+      - "4566:4566"
+    environment:
+    - LOCALSTACK_AUTH_TOKEN=${LOCALSTACK_AUTH_TOKEN}
+    - SERVICES=s3
+    - DEBUG=1
+    - PERSISTENCE=1
+    volumes:
+        - localstack_data:/var/lib/localstack
+        - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+        - internal
+
   app:
     build: .
     container_name: spring-app
     ports:
       - "8080:8080"
+    env_file:
+      - .env
     environment:
-      MAIL_PASSWORD: ${MAIL_PASSWORD}
-      MAIL_USERNAME: ${MAIL_USERNAME}
-      JWT_SECRET: ${JWT_SECRET}
       SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/Ecommerce
       SPRING_DATASOURCE_USERNAME: root
       SPRING_DATASOURCE_PASSWORD: root
     depends_on:
       - mysql
+      - localstack
     networks:
       - internal
 
   mysql:
     image: mysql:8.0
-    container_name: mysql-container
+    container_name: mysql
     ports:
       - "3310:3306"
     environment:
@@ -33,6 +49,7 @@ services:
 
 volumes:
   mysql_data:
+  localstack_data:
 
 networks:
   internal:

@@ -1,6 +1,8 @@
 package com.example.ecommerceproject.service.impl;
 
 import static lombok.AccessLevel.PRIVATE;
+
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -10,12 +12,16 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 
+import org.apache.tomcat.util.http.parser.MediaType;
 import org.modelmapper.ModelMapper;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
@@ -54,11 +60,21 @@ import com.example.ecommerceproject.util.MessageKeys;
 
 import lombok.RequiredArgsConstructor;
 import lombok.experimental.FieldDefaults;
+import software.amazon.awssdk.core.ResponseInputStream;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.GetObjectResponse;
+import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
+import software.amazon.awssdk.services.s3.model.S3Exception;
 
 @Service
 @RequiredArgsConstructor
 @FieldDefaults(level = PRIVATE)
 public class CustomerServiceImpl implements CustomerService {
+
+    private final S3Client s3Client;
+    @Value("${aws.bucket}")
+    private String bucket;
 
     final CustomerRepository customerRepository;
     final AddressRepository addressRepository;
@@ -80,7 +96,7 @@ public class CustomerServiceImpl implements CustomerService {
         dto.setId(userId);
         mapper.map(user, dto);
         dto.setId(user.getId());
-        dto.setImage(computeImageUrl(userId, customer));
+        dto.setImage(computeImageUrl(bucket, user.getId()));
 
         return dto;
     }
@@ -168,20 +184,14 @@ public class CustomerServiceImpl implements CustomerService {
     }
 
     private Customer getActiveCustomerByUserId(Long userId) {
-        try {
-            Customer customer = customerRepository.findByUserId(userId)
-                    .orElseThrow(() -> new ApiException(messageService.get(MessageKeys.ERROR_CUSTOMER_NOT_FOUND), 404));
+        Customer customer = customerRepository.findByUserId(userId)
+                .orElseThrow(() -> new ApiException(messageService.get(MessageKeys.ERROR_CUSTOMER_NOT_FOUND), 404));
 
-            if (!customer.getUser().isActive()) {
-                throw new ApiException(messageService.get(MessageKeys.AUTH_ACCOUNT_NOT_ACTIVATED), 400);
-            }
-            return customer;
-        } catch (Exception e) {
-            if (e instanceof ApiException) {
-                throw e;
-            }
-            throw new ApiException(messageService.get(MessageKeys.ERROR_CUSTOMER_NOT_FOUND), 404);
+        if (!customer.getUser().isActive()) {
+            throw new ApiException(messageService.get(MessageKeys.AUTH_ACCOUNT_NOT_ACTIVATED), 400);
         }
+
+        return customer;
     }
 
     @Override
@@ -332,28 +342,28 @@ public class CustomerServiceImpl implements CustomerService {
         return dto;
     }
 
-    private String computeImageUrl(Long userId, Customer customer) {
-        try {
-            Path userDir = Paths.get("uploads/users/");
-            if (!Files.exists(userDir)) {
-                return null;
+    private String computeImageUrl(String bucket, Long userId) {
+
+        validateUserAccess(userId);
+        Customer customer = getActiveCustomerByUserId(userId);
+
+        String[] extensions = {"jpg", "jpeg", "png"};
+
+        for (String ext : extensions) {
+            String key = "users/" + userId + "/profile." + ext;
+
+            try {
+                s3Client.headObject(HeadObjectRequest.builder()
+                        .bucket(bucket)
+                        .key(key)
+                        .build());
+                return key;
+            } catch (S3Exception e) {
+                if (e.statusCode() == 404) continue;
+                throw e;
             }
-
-            Long[] idsToTry = { userId, customer != null ? customer.getId() : null };
-
-            for (Long id : idsToTry) {
-                if (id == null) continue;
-
-                String imageUrl = findImageForId(id);
-                if (imageUrl != null) {
-                    return imageUrl;
-                }
-            }
-
-            return null;
-        } catch (Exception e) {
-            return null;
         }
+        return null;
     }
 
     private void collectCategoryIdsRecursively(Category category, List<Long> ids) {
@@ -363,21 +373,6 @@ public class CustomerServiceImpl implements CustomerService {
             for (Category child : category.getSubCategories()) {
                 collectCategoryIdsRecursively(child, ids);
             }
-        }
-    }
-
-    private String findImageForId(Long id) {
-        try {
-            Path userDir = Paths.get("uploads/users/");
-            for (String extension : Arrays.asList("jpg", "jpeg", "png")) {
-                Path imagePath = userDir.resolve(id + "." + extension);
-                if (Files.exists(imagePath)) {
-                    return "/api/user/" + id + "/image/" + id + "." + extension;
-                }
-            }
-            return null;
-        } catch (Exception e) {
-            return null;
         }
     }
 
@@ -394,26 +389,32 @@ public class CustomerServiceImpl implements CustomerService {
     }
 
     private void validateUserAccess(Long requestedUserId) {
-        Long authenticatedUserId = getCurrentUserId();
+        Long authenticatedUserId = getCurrentUser().getUserId();
         if (!requestedUserId.equals(authenticatedUserId)) {
             throw new ApiException(messageService.get(MessageKeys.ERROR_ACCESS_DENIED), 403);
         }
     }
 
-    private Long getCurrentUserId() {
-        try {
-            Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
-            if (authentication != null && authentication.getPrincipal() instanceof CustomUserDetails) {
-                CustomUserDetails userDetails = (CustomUserDetails) authentication.getPrincipal();
-                return userDetails.getUserId();
-            }
-            throw new ApiException(messageService.get(MessageKeys.AUTH_USER_NOT_AUTHENTICATED), 401);
-        } catch (Exception e) {
-            if (e instanceof ApiException) {
-                throw e;
-            }
+    private void validateImageAccess(Long requestedUserId) {
+        CustomUserDetails user = getCurrentUser();
+
+        boolean isOwner = requestedUserId.equals(user.getUserId());
+        boolean isAdmin = user.getAuthorities()
+                .contains(new SimpleGrantedAuthority("ROLE_ADMIN"));
+
+        if (!isOwner && !isAdmin) {
+            throw new ApiException(messageService.get(MessageKeys.AUTH_ACCESS_DENIED), 403);
+        }
+    }
+
+    private CustomUserDetails getCurrentUser() {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+
+        if (auth == null || !(auth.getPrincipal() instanceof CustomUserDetails user)) {
             throw new ApiException(messageService.get(MessageKeys.AUTH_USER_NOT_AUTHENTICATED), 401);
         }
+
+        return user;
     }
 
     private int getVariationNumberFromId(Long variationId) {

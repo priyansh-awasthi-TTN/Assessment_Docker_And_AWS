@@ -1,5 +1,8 @@
 package com.example.ecommerceproject.controller;
 
+import lombok.extern.slf4j.Slf4j;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.Logger;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.validation.annotation.Validated;
@@ -26,7 +29,7 @@ import jakarta.validation.constraints.Positive;
 import lombok.RequiredArgsConstructor;
 
 @RestController
-@RequestMapping("/api/user")
+@RequestMapping("/api/users")
 @PreAuthorize("hasRole('CUSTOMER') or hasRole('SELLER') or hasRole('ADMIN')")
 @RequiredArgsConstructor
 @Validated
@@ -35,6 +38,7 @@ import lombok.RequiredArgsConstructor;
 public class ImageUploadController {
 
     private final ImageUploadService imageUploadService;
+    private static final Logger logger = org.apache.logging.log4j.LogManager.getLogger(ImageUploadController.class);
 
     @Operation(summary = "Upload Profile Image",
                description = "Upload a profile image for the user. Supports JPG, JPEG, PNG formats. Maximum file size: 5MB")
@@ -49,26 +53,23 @@ public class ImageUploadController {
             @RequestParam("image")
             MultipartFile file) {
 
+        System.out.println("CONTROLLER HIT");
         return ResponseEntity.ok(imageUploadService.uploadUserImage(userId, file));
     }
 
     @Operation(summary = "Get User Image",
                description = "Retrieve user profile image. Customers/Sellers can only access their own images. Admins can access any user's image.")
-    @GetMapping("/{userId}/image/{filename}")
+    @GetMapping("/{userId}/profile")
     public ResponseEntity<Resource> getUserImage(
             @Parameter(description = "User ID", required = true)
             @PathVariable
             @Positive(message = "{validation.invalid_id_format}")
-            Long userId,
+            Long userId) {
 
-            @Parameter(description = "Image filename", required = true)
-            @PathVariable
-            String filename) {
-
-        Resource resource = imageUploadService.getUserImage(userId, filename);
+        Resource resource = imageUploadService.getUserImage(userId);
         return ResponseEntity.ok()
                 .contentType(MediaType.IMAGE_JPEG)
-                .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + filename + "\"")
+                .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + userId + "/profile" + "\"")
                 .body(resource);
     }
 

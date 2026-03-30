@@ -6,10 +6,12 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
 import java.util.Arrays;
 import java.util.List;
 
+import org.apache.tomcat.util.http.fileupload.IOUtils;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 import org.springframework.security.core.Authentication;
@@ -28,6 +30,12 @@ import com.example.ecommerceproject.util.MessageKeys;
 import lombok.RequiredArgsConstructor;
 import lombok.experimental.FieldDefaults;
 import lombok.extern.slf4j.Slf4j;
+import software.amazon.awssdk.core.ResponseBytes;
+import software.amazon.awssdk.core.ResponseInputStream;
+import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.core.sync.ResponseTransformer;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.*;
 
 @Service
 @RequiredArgsConstructor
@@ -35,11 +43,15 @@ import lombok.extern.slf4j.Slf4j;
 @FieldDefaults(level = PRIVATE)
 public class ImageUploadServiceImpl implements ImageUploadService {
 
+    @Value("${aws.bucket}")
+    private String bucket;
+
     final UserRepository userRepository;
     final MessageService messageService;
     static final String UPLOAD_DIR = "uploads/users/";
     static final List<String> ALLOWED_EXTENSIONS = Arrays.asList("jpg", "jpeg", "png");
     static final long MAX_FILE_SIZE = 5 * 1024 * 1024;
+    final S3Client s3Client;
 
     @Override
     @Transactional(readOnly = true)
@@ -54,20 +66,21 @@ public class ImageUploadServiceImpl implements ImageUploadService {
                     .orElseThrow(() -> new ApiException(MessageKeys.ERROR_USER_NOT_FOUND, 404));
             validateFile(file);
 
-            Path uploadPath = Paths.get(UPLOAD_DIR);
-            if (!Files.exists(uploadPath)) {
-                Files.createDirectories(uploadPath);
-            }
+            String extension = getFileExtension(file.getOriginalFilename());
 
-            String originalFilename = file.getOriginalFilename();
-            String fileExtension = getFileExtension(originalFilename);
-            String fileName = userId + "." + fileExtension;
-            Path filePath = uploadPath.resolve(fileName);
-
+            String key = "users/" + userId + "/profile." + extension;
             deleteExistingImage(userId);
-            Files.copy(file.getInputStream(), filePath, StandardCopyOption.REPLACE_EXISTING);
 
-            return new ApiResponseDTO(messageService.get(MessageKeys.IMAGE_UPLOAD_SUCCESS), 200);
+            s3Client.putObject(
+                    PutObjectRequest.builder()
+                            .bucket(bucket)
+                            .key(key)
+                            .contentType(file.getContentType())
+                            .build(),
+                    RequestBody.fromInputStream(file.getInputStream(), file.getSize())
+            );
+
+            return new ApiResponseDTO(messageService.get(MessageKeys.IMAGE_UPLOAD_SUCCESS), 204);
 
         } catch (IOException e) {
             log.error("Failed to upload image for user ID: {}", userId, e);
@@ -83,7 +96,7 @@ public class ImageUploadServiceImpl implements ImageUploadService {
 
     @Override
     @Transactional(readOnly = true)
-    public Resource getUserImage(Long userId, String filename) {
+    public Resource getUserImage(Long userId) {
         try {
             Long authenticatedUserId = getCurrentUserId();
             String userRole = getCurrentUserRole();
@@ -92,23 +105,31 @@ public class ImageUploadServiceImpl implements ImageUploadService {
                 throw new ApiException(MessageKeys.ERROR_ACCESS_DENIED, 403);
             }
 
-            Path imagePath = Paths.get(UPLOAD_DIR).resolve(filename);
+            String[] extensions = {"jpg", "jpeg", "png"};
+            for (String ext : extensions) {
+                String key = "users/" + userId + "/profile." + ext;
+                try {
+                    GetObjectRequest getObjectRequest = GetObjectRequest.builder()
+                            .bucket(bucket)
+                            .key(key)
+                            .build();
 
-            if (!Files.exists(imagePath)) {
-                throw new ApiException(MessageKeys.IMAGE_NOT_FOUND, 404);
+                    ResponseBytes<GetObjectResponse> response = s3Client.getObject(
+                            getObjectRequest,
+                            ResponseTransformer.toBytes()
+                    );
+
+                    byte[] imageBytes = response.asByteArray();
+                    return new ByteArrayResource(imageBytes);
+
+                } catch (S3Exception e) {
+                    if (e.statusCode() == 404) continue;
+                    throw e;
+                }
             }
 
-            String expectedPrefix = userId + ".";
-            if (!filename.startsWith(expectedPrefix)) {
-                throw new ApiException(MessageKeys.ERROR_ACCESS_DENIED, 403);
-            }
+            throw new ApiException(messageService.get(MessageKeys.IMAGE_NOT_FOUND), 404);
 
-            String fileExtension = getFileExtension(filename);
-            if (!ALLOWED_EXTENSIONS.contains(fileExtension.toLowerCase())) {
-                throw new ApiException(MessageKeys.IMAGE_INVALID_FORMAT, 400);
-            }
-
-            return new FileSystemResource(imagePath);
         } catch (Exception e) {
             if (e instanceof ApiException) {
                 throw e;
