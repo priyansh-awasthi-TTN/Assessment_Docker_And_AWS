@@ -3,16 +3,11 @@ package com.example.ecommerceproject.service.impl;
 import static lombok.AccessLevel.PRIVATE;
 
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.List;
 
-import org.apache.tomcat.util.http.fileupload.IOUtils;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ByteArrayResource;
-import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -31,7 +26,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.experimental.FieldDefaults;
 import lombok.extern.slf4j.Slf4j;
 import software.amazon.awssdk.core.ResponseBytes;
-import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.core.sync.ResponseTransformer;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -55,6 +49,48 @@ public class ImageUploadServiceImpl implements ImageUploadService {
 
     @Override
     @Transactional(readOnly = true)
+    public Resource getProductImage(Long userId, Long productId, Long variationId) {
+        try {
+            Long authenticatedUserId = getCurrentUserId();
+            String userRole = getCurrentUserRole();
+
+            if (!"ADMIN".equals(userRole) && !userId.equals(authenticatedUserId)) {
+                throw new ApiException(MessageKeys.ERROR_ACCESS_DENIED, 403);
+            }
+
+            String prefix = "products/" + productId + "/";
+            String basePattern = productId + "v" + variationId + ".";
+
+            ListObjectsV2Response response = s3Client.listObjectsV2(
+                    ListObjectsV2Request.builder()
+                            .bucket(bucket)
+                            .prefix(prefix)
+                            .build()
+            );
+
+            S3Object object = response.contents().stream()
+                    .filter(obj -> obj.key().contains(basePattern))
+                    .findFirst()
+                    .orElseThrow(() -> new ApiException(MessageKeys.IMAGE_NOT_FOUND, 404));
+
+            ResponseBytes<GetObjectResponse> image = s3Client.getObject(
+                    GetObjectRequest.builder()
+                            .bucket(bucket)
+                            .key(object.key())
+                            .build(),
+                    ResponseTransformer.toBytes()
+            );
+
+            return new ByteArrayResource(image.asByteArray());
+
+        } catch (Exception e) {
+            if (e instanceof ApiException) throw e;
+            throw new ApiException(MessageKeys.ERROR_INTERNAL_SERVER, 500);
+        }
+    }
+
+    @Override
+    @Transactional(readOnly = true)
     public ApiResponseDTO uploadUserImage(Long userId, MultipartFile file) {
         try {
             Long authenticatedUserId = getCurrentUserId();
@@ -69,7 +105,6 @@ public class ImageUploadServiceImpl implements ImageUploadService {
             String extension = getFileExtension(file.getOriginalFilename());
 
             String key = "users/" + userId + "/profile." + extension;
-            deleteExistingImage(userId);
 
             s3Client.putObject(
                     PutObjectRequest.builder()
@@ -138,31 +173,6 @@ public class ImageUploadServiceImpl implements ImageUploadService {
         }
     }
 
-    @Override
-    @Transactional(readOnly = true)
-    public Resource getProductImage(Long productId, String filename) {
-        try {
-
-            Path imagePath = Paths.get("uploads/products/" + productId).resolve(filename);
-
-            if (!Files.exists(imagePath)) {
-                throw new ApiException(MessageKeys.IMAGE_NOT_FOUND, 404);
-            }
-
-            String fileExtension = getFileExtension(filename);
-            if (!ALLOWED_EXTENSIONS.contains(fileExtension.toLowerCase())) {
-                throw new ApiException(MessageKeys.IMAGE_INVALID_FORMAT, 400);
-            }
-
-            return new FileSystemResource(imagePath);
-        } catch (Exception e) {
-            if (e instanceof ApiException) {
-                throw e;
-            }
-            throw new ApiException(MessageKeys.ERROR_INTERNAL_SERVER, 500);
-        }
-    }
-
     private Long getCurrentUserId() {
         try {
             Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
@@ -217,20 +227,5 @@ public class ImageUploadServiceImpl implements ImageUploadService {
             throw new ApiException(MessageKeys.IMAGE_INVALID_FILENAME, 400);
         }
         return filename.substring(filename.lastIndexOf(".") + 1);
-    }
-
-    private void deleteExistingImage(Long userId) {
-        try {
-            Path uploadPath = Paths.get(UPLOAD_DIR);
-            for (String extension : ALLOWED_EXTENSIONS) {
-                Path existingFile = uploadPath.resolve(userId + "." + extension);
-                if (Files.exists(existingFile)) {
-                    Files.delete(existingFile);
-                    log.info("Deleted existing image: {}", existingFile.getFileName());
-                }
-            }
-        } catch (IOException e) {
-            log.warn("Failed to delete existing image for user ID: {}", userId, e);
-        }
     }
 }

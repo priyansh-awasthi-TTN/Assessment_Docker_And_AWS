@@ -75,22 +75,28 @@ public class ImageUploadController {
 
     @Operation(summary = "Get Product Image",
                description = "Retrieve product variation image.")
-    @GetMapping("/products/{productId}/images/{filename}")
+    @GetMapping("{userId}/products/{productId}v{variationId}/image")
     @PreAuthorize("permitAll()")
     public ResponseEntity<Resource> getProductImage(
+            @Parameter(description = "User ID", required = true)
+            @PathVariable
+            @Positive(message = "{validation.invalid_id_format}")
+            Long userId,
+
             @Parameter(description = "Product ID", required = true)
             @PathVariable
             @Positive(message = "{validation.invalid_id_format}")
             Long productId,
 
-            @Parameter(description = "Image filename", required = true)
+            @Parameter(description = "Product ID", required = true)
             @PathVariable
-            String filename) {
+            @Positive(message = "{validation.invalid_id_format}")
+            Long variationId) {
 
-        Resource resource = imageUploadService.getProductImage(productId, filename);
+        Resource resource = imageUploadService.getProductImage(userId, productId, variationId);
         return ResponseEntity.ok()
                 .contentType(MediaType.IMAGE_JPEG)
-                .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + filename + "\"")
+                .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + userId + "/product/" + productId + "/image" + "\"")
                 .body(resource);
     }
 }

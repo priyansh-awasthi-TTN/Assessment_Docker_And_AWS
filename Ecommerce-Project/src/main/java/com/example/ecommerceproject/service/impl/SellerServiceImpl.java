@@ -1,7 +1,6 @@
 package com.example.ecommerceproject.service.impl;
 
-import com.example.ecommerceproject.repository.ProductRepository;
-import com.example.ecommerceproject.repository.ProductVariationRepository;
+import com.example.ecommerceproject.repository.*;
 
 import static lombok.AccessLevel.PRIVATE;
 
@@ -11,15 +10,11 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Collectors;
 
 import org.modelmapper.ModelMapper;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
@@ -60,10 +55,6 @@ import com.example.ecommerceproject.entity.ProductVariations;
 import com.example.ecommerceproject.entity.Seller;
 import com.example.ecommerceproject.entity.User;
 import com.example.ecommerceproject.exception.ApiException;
-import com.example.ecommerceproject.repository.AddressRepository;
-import com.example.ecommerceproject.repository.CategoryMetadataFieldValuesRepository;
-import com.example.ecommerceproject.repository.CategoryRepository;
-import com.example.ecommerceproject.repository.SellerRepository;
 import com.example.ecommerceproject.service.EmailService;
 import com.example.ecommerceproject.service.MessageService;
 import com.example.ecommerceproject.service.SellerService;
@@ -75,6 +66,9 @@ import com.example.ecommerceproject.enums.AddressType;
 import lombok.RequiredArgsConstructor;
 import lombok.experimental.FieldDefaults;
 import lombok.extern.slf4j.Slf4j;
+import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.*;
 
 @Service
 @RequiredArgsConstructor
@@ -82,7 +76,11 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 public class SellerServiceImpl implements SellerService {
 
+    @Value("aws.bucket")
+    String bucket;
+
     final SellerRepository sellerRepository;
+    final UserRepository userRepository;
     final ProductRepository productRepository;
     final AddressRepository addressRepository;
     final CategoryRepository categoryRepository;
@@ -95,6 +93,9 @@ public class SellerServiceImpl implements SellerService {
     final ModelMapper modelMapper;
     final ObjectMapper objectMapper;
     final Validator validator;
+    static final List<String> ALLOWED_EXTENSIONS = Arrays.asList("jpg", "jpeg", "png");
+    static final long MAX_FILE_SIZE = 5 * 1024 * 1024;
+    private final S3Client s3Client;
 
     @Override
     @Transactional(readOnly = true)
@@ -228,7 +229,7 @@ public class SellerServiceImpl implements SellerService {
         if (!violations.isEmpty()) {
             StringBuilder errorMessage = new StringBuilder();
             for (ConstraintViolation<ProductVariationCreateRequest> violation : violations) {
-                if (errorMessage.length() > 0) {
+                if (!errorMessage.isEmpty()) {
                     errorMessage.append("; ");
                 }
                 errorMessage.append(violation.getPropertyPath()).append(": ").append(violation.getMessage());
@@ -252,7 +253,7 @@ public class SellerServiceImpl implements SellerService {
 
             String primaryImageName = null;
             if (primaryImage != null && !primaryImage.isEmpty()) {
-                primaryImageName = saveProductImage(productId, nextVariationNumber, primaryImage, true);
+                primaryImageName = saveProductImage(seller.getUser().getId(), productId, nextVariationNumber, primaryImage);
             }
 
             if (secondaryImages != null && secondaryImages.length > 0) {
@@ -392,7 +393,7 @@ public class SellerServiceImpl implements SellerService {
         if (!violations.isEmpty()) {
             StringBuilder errorMessage = new StringBuilder();
             for (ConstraintViolation<ProductVariationUpdateRequest> violation : violations) {
-                if (errorMessage.length() > 0) {
+                if (!errorMessage.isEmpty()) {
                     errorMessage.append("; ");
                 }
                 errorMessage.append(violation.getPropertyPath()).append(": ").append(violation.getMessage());
@@ -430,7 +431,7 @@ public class SellerServiceImpl implements SellerService {
             int variationNumber = getVariationNumber(variationId);
 
             if (primaryImage != null && !primaryImage.isEmpty()) {
-                String primaryImageName = saveProductImage(productId, variationNumber, primaryImage, true);
+                String primaryImageName = saveProductImage(seller.getUser().getId(), productId, variationNumber, primaryImage);
                 existingVariation.setPrimaryImageName(primaryImageName);
             }
 
@@ -479,8 +480,8 @@ public class SellerServiceImpl implements SellerService {
                     List<String> originalCaseValues = metadataFieldRepository.findAllByCategory_Id(categoryId)
                             .stream()
                             .filter(cmfv -> cmfv.getMetadataField().getName().equalsIgnoreCase(entry.getKey()))
-                            .map(cmfv -> cmfv.getValue())
-                            .collect(Collectors.toList());
+                            .map(CategoryMetadataFieldValues::getValue)
+                            .toList();
 
                     invalidValues
                             .add(entry.getKey() + ": " + entry.getValue() + " (allowed: " + originalCaseValues + ")");
@@ -663,55 +664,63 @@ public class SellerServiceImpl implements SellerService {
         return variationId.intValue();
     }
 
-    private String saveProductImage(Long productId, int variationNumber, MultipartFile file, boolean isPrimary) {
+    private String saveProductImage(Long userId, Long productId, int variationNumber, MultipartFile file) {
         try {
-            if (file.isEmpty()) {
-                throw new ApiException(messageService.get(MessageKeys.IMAGE_FILE_REQUIRED), 400);
+            Long authenticatedUserId = getCurrentUserId();
+            if (!userId.equals(authenticatedUserId)) {
+                throw new ApiException(MessageKeys.ERROR_ACCESS_DENIED, 403);
             }
 
-            String originalFilename = file.getOriginalFilename();
-            if (originalFilename == null || !originalFilename.matches("(?i).*\\.(jpg|jpeg|png)$")) {
-                throw new ApiException(messageService.get(MessageKeys.IMAGE_INVALID_FORMAT), 400);
-            }
+            userRepository.findById(userId)
+                    .orElseThrow(() -> new ApiException(MessageKeys.ERROR_USER_NOT_FOUND, 404));
 
-            String extension = originalFilename.substring(originalFilename.lastIndexOf("."));
-            String filename = productId + "v" + variationNumber + extension;
+            validateFile(file);
 
-            Path uploadDir = Paths.get("uploads/products/" + productId);
-            Files.createDirectories(uploadDir);
+            String ext = getFileExtension(file.getOriginalFilename());
 
-            Path filePath = uploadDir.resolve(filename);
-            Files.copy(file.getInputStream(), filePath, StandardCopyOption.REPLACE_EXISTING);
+            String key = "products/" + productId + "/" + productId + "v" + variationNumber + "." + ext;
 
-            return filename;
+            s3Client.putObject(
+                    PutObjectRequest.builder()
+                            .bucket(bucket)
+                            .key(key)
+                            .contentType(file.getContentType())
+                            .build(),
+                    RequestBody.fromInputStream(file.getInputStream(), file.getSize())
+            );
+
+            return key;
 
         } catch (IOException e) {
-            throw new ApiException(messageService.get(MessageKeys.IMAGE_UPLOAD_FAILED), 500);
+            log.error("Failed to upload image for user ID: {}", userId, e);
+            throw new ApiException(MessageKeys.IMAGE_UPLOAD_FAILED, 500);
         }
     }
 
     private void saveProductSecondaryImages(Long productId, int variationNumber, MultipartFile[] files) {
+
         for (int i = 0; i < files.length; i++) {
             MultipartFile file = files[i];
-            if (!file.isEmpty()) {
-                try {
-                    String originalFilename = file.getOriginalFilename();
-                    if (originalFilename == null || !originalFilename.matches("(?i).*\\.(jpg|jpeg|png)$")) {
-                        continue;
-                    }
 
-                    String extension = originalFilename.substring(originalFilename.lastIndexOf("."));
-                    String filename = productId + "v" + variationNumber + "_" + (i + 1) + extension;
+            if (file == null || file.isEmpty()) continue;
 
-                    Path uploadDir = Paths.get("uploads/products/" + productId);
-                    Files.createDirectories(uploadDir);
+            try {
+                String ext = getFileExtension(file.getOriginalFilename());
 
-                    Path filePath = uploadDir.resolve(filename);
-                    Files.copy(file.getInputStream(), filePath, StandardCopyOption.REPLACE_EXISTING);
+                String key = "products/" + productId + "/" +
+                        productId + "v" + variationNumber + "_" + (i + 1) + "." + ext;
 
-                } catch (IOException e) {
-                    log.warn("Failed to save secondary image {}: {}", i, e.getMessage());
-                }
+                s3Client.putObject(
+                        PutObjectRequest.builder()
+                                .bucket(bucket)
+                                .key(key)
+                                .contentType(file.getContentType())
+                                .build(),
+                        RequestBody.fromInputStream(file.getInputStream(), file.getSize())
+                );
+
+            } catch (Exception e) {
+                log.warn("Failed to save secondary image {}: {}", i, e.getMessage());
             }
         }
     }
@@ -722,36 +731,90 @@ public class SellerServiceImpl implements SellerService {
     }
 
     private List<String> generateSecondaryImageUrls(Long productId, int variationNumber) {
-        List<String> secondaryUrls = new ArrayList<>();
-        try {
-            Path productDir = Paths.get("uploads/products/" + productId);
-            if (!Files.exists(productDir)) {
-                return secondaryUrls;
-            }
 
+        List<String> secondaryUrls = new ArrayList<>();
+
+        try {
+            String prefix = "products/" + productId + "/";
             String basePattern = productId + "v" + variationNumber + "_";
 
-            for (int i = 1; i <= 10; i++) {
-                boolean foundImage = false;
-                for (String extension : Arrays.asList("jpg", "jpeg", "png")) {
-                    String filename = basePattern + i + "." + extension;
-                    Path imagePath = productDir.resolve(filename);
-                    if (Files.exists(imagePath)) {
-                        secondaryUrls.add("/api/user/products/" + productId + "/images/" + filename);
-                        foundImage = true;
-                        break;
-                    }
-                }
+            ListObjectsV2Response response = s3Client.listObjectsV2(
+                    ListObjectsV2Request.builder()
+                            .bucket(bucket)
+                            .prefix(prefix)
+                            .build()
+            );
 
-                if (!foundImage) {
-                    break;
-                }
+            List<S3Object> sortedObjects = response.contents().stream()
+                    .filter(obj -> {
+                        String fileName = obj.key().substring(obj.key().lastIndexOf("/") + 1);
+                        return fileName.startsWith(basePattern);
+                    })
+                    .sorted(Comparator.comparingInt(obj -> {
+                        String fileName = obj.key().substring(obj.key().lastIndexOf("/") + 1);
+                        try {
+                            String num = fileName.replace(basePattern, "").split("\\.")[0];
+                            return Integer.parseInt(num);
+                        } catch (Exception e) {
+                            return Integer.MAX_VALUE; // push bad files to end
+                        }
+                    }))
+                    .toList();
+
+            for (S3Object obj : sortedObjects) {
+                String url = s3Client.utilities().getUrl(GetUrlRequest.builder()
+                        .bucket(bucket)
+                        .key(obj.key())
+                        .build()).toExternalForm();
+
+                secondaryUrls.add(url);
             }
+
         } catch (Exception e) {
-            log.warn("Error generating secondary image URLs for product {} variation {}: {}",
+            log.warn("Error generating S3 secondary image URLs for product {} variation {}: {}",
                     productId, variationNumber, e.getMessage());
         }
+
         return secondaryUrls;
+    }
+
+    private void validateFile(MultipartFile file) {
+        if (file.isEmpty()) {
+            throw new ApiException(MessageKeys.IMAGE_FILE_REQUIRED, 400);
+        }
+        if (file.getSize() > MAX_FILE_SIZE) {
+            throw new ApiException(MessageKeys.IMAGE_FILE_TOO_LARGE, 400);
+        }
+        String originalFilename = file.getOriginalFilename();
+        if (originalFilename == null || originalFilename.trim().isEmpty()) {
+            throw new ApiException(MessageKeys.IMAGE_INVALID_FILENAME, 400);
+        }
+
+        String fileExtension = getFileExtension(originalFilename);
+        if (!ALLOWED_EXTENSIONS.contains(fileExtension.toLowerCase())) {
+            throw new ApiException(MessageKeys.IMAGE_INVALID_FORMAT, 400);
+        }
+    }
+
+    private String getFileExtension(String filename) {
+        if (filename == null || filename.isBlank()) {
+            throw new ApiException(MessageKeys.IMAGE_INVALID_FILENAME, 400);
+        }
+
+        String cleanName = filename.substring(filename.lastIndexOf("/") + 1);
+
+        int dotIndex = cleanName.lastIndexOf(".");
+        if (dotIndex <= 0 || dotIndex == cleanName.length() - 1) {
+            throw new ApiException(MessageKeys.IMAGE_INVALID_FILENAME, 400);
+        }
+
+        String ext = cleanName.substring(dotIndex + 1).toLowerCase();
+
+        if (!ALLOWED_EXTENSIONS.contains(ext)) {
+            throw new ApiException("Unsupported image format", 400);
+        }
+
+        return ext;
     }
 
 }
