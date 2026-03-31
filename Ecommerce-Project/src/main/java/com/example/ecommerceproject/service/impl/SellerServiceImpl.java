@@ -70,8 +70,8 @@ import software.amazon.awssdk.services.s3.model.*;
 @Slf4j
 public class SellerServiceImpl implements SellerService {
 
-    @Value("aws.bucket")
-    String bucket;
+    @Value("${aws.bucket}")
+    private String bucket;
 
     final SellerRepository sellerRepository;
     final UserRepository userRepository;
@@ -94,8 +94,6 @@ public class SellerServiceImpl implements SellerService {
     @Override
     @Transactional(readOnly = true)
     public SellerProfileResponseDTO getProfile(Long userId) {
-        validateUserAccess(userId);
-        validateSellerRole();
         Seller seller = getActiveSellerByUserId(userId);
         User user = seller.getUser();
         List<Address> addresses = addressRepository.findByUserAndUserIsDeletedFalse(user);
@@ -105,9 +103,9 @@ public class SellerServiceImpl implements SellerService {
         modelMapper.map(user, response);
         modelMapper.map(address, response);
         response.setId(user.getId());
-        response.setImage(computeImageUrl(user.getId()));
+        response.setImage(computeImageUrl(bucket, user.getId()));
+        log.info("Key Into this: {}", computeImageUrl(bucket, user.getId()));
         response.setAddressId(address.getId());
-
         return response;
     }
 
@@ -172,7 +170,7 @@ public class SellerServiceImpl implements SellerService {
     @Override
     @Transactional
     public ApiResponse createProduct(ProductCreateRequest dto) {
-        Seller seller = getActiveSellerByUserId(getCurrentUserId());
+        Seller seller = getActiveSellerByUserId(getCurrentUserId().getUserId());
         Long sellerId = seller.getId();
 
         if (!categoryRepository.isLeafNode(dto.getCategoryId())) {
@@ -232,7 +230,7 @@ public class SellerServiceImpl implements SellerService {
         }
 
         try {
-            Seller seller = getActiveSellerByUserId(getCurrentUserId());
+            Seller seller = getActiveSellerByUserId(getCurrentUserId().getUserId());
             Product product = productRepository.findByIdAndSeller_IdAndIsDeletedFalse(productId, seller.getId())
                     .orElseThrow(() -> new ApiException(messageService.get(MessageKeys.PRODUCT_NOT_FOUND), 400));
 
@@ -273,7 +271,7 @@ public class SellerServiceImpl implements SellerService {
 
     @Transactional(readOnly = true)
     public Page<ProductResponseDTO> getAllProducts(Map<String, String> params) {
-        Seller seller = getActiveSellerByUserId(getCurrentUserId());
+        Seller seller = getActiveSellerByUserId(getCurrentUserId().getUserId());
         int page = Integer.parseInt(params.getOrDefault("offset", "0"));
         int size = Integer.parseInt(params.getOrDefault("max", "10"));
         String sortBy = params.getOrDefault("sort", "id");
@@ -315,7 +313,7 @@ public class SellerServiceImpl implements SellerService {
     @Transactional(readOnly = true)
     public Page<ProductVariationResponse> getProductVariations(Long productId, int offset, int max, String sort,
             String order) {
-        Seller seller = getActiveSellerByUserId(getCurrentUserId());
+        Seller seller = getActiveSellerByUserId(getCurrentUserId().getUserId());
 
         productRepository.findByIdAndSeller_IdAndIsDeletedFalse(productId, seller.getId())
                 .orElseThrow(() -> new ApiException(messageService.get(MessageKeys.INVALID_PRODUCT_ID), 400));
@@ -342,7 +340,7 @@ public class SellerServiceImpl implements SellerService {
     @Override
     @Transactional
     public ApiResponse deleteProduct(Long productId) {
-        Seller seller = getActiveSellerByUserId(getCurrentUserId());
+        Seller seller = getActiveSellerByUserId(getCurrentUserId().getUserId());
 
         Product product = productRepository.findByIdAndSeller_IdAndIsDeletedFalse(productId, seller.getId())
                 .orElseThrow(
@@ -354,7 +352,7 @@ public class SellerServiceImpl implements SellerService {
     @Override
     @Transactional
     public ApiResponse updateProduct(Long productId, ProductUpdateRequest dto) {
-        Seller seller = getActiveSellerByUserId(getCurrentUserId());
+        Seller seller = getActiveSellerByUserId(getCurrentUserId().getUserId());
         Long sellerId = seller.getId();
 
         Product existingProduct = productRepository.findByIdAndSeller_IdAndIsDeletedFalse(productId, sellerId)
@@ -396,7 +394,7 @@ public class SellerServiceImpl implements SellerService {
         }
 
         try {
-            Seller seller = getActiveSellerByUserId(getCurrentUserId());
+            Seller seller = getActiveSellerByUserId(getCurrentUserId().getUserId());
             Product product = productRepository.findByIdAndSeller_IdAndIsDeletedFalse(productId, seller.getId())
                     .orElseThrow(() -> new ApiException(messageService.get(MessageKeys.PRODUCT_NOT_FOUND), 400));
 
@@ -548,24 +546,18 @@ public class SellerServiceImpl implements SellerService {
     }
 
     private Seller getActiveSellerByUserId(Long userId) {
-        try {
-            Seller seller = sellerRepository.findByUser_Id(userId)
-                    .orElseThrow(() -> new ApiException(messageService.get(MessageKeys.ERROR_SELLER_NOT_FOUND), 404));
+        Seller seller = sellerRepository.findByUser_Id(userId)
+                .orElseThrow(() -> new ApiException(messageService.get(MessageKeys.ERROR_CUSTOMER_NOT_FOUND), 404));
 
-            if (!seller.getUser().isActive()) {
-                throw new ApiException(messageService.get(MessageKeys.AUTH_ACCOUNT_NOT_ACTIVATED), 400);
-            }
-
-            return seller;
-        } catch (Exception e) {
-            if (e instanceof ApiException) {
-                throw e;
-            }
-            throw new ApiException(messageService.get(MessageKeys.ERROR_SELLER_NOT_FOUND), 404);
+        if (!seller.getUser().isActive()) {
+            throw new ApiException(messageService.get(MessageKeys.AUTH_ACCOUNT_NOT_ACTIVATED), 400);
         }
+
+        return seller;
     }
 
-    private String computeImageUrl(Long userId) {
+    private String computeImageUrl(String bucket, Long userId) {
+
         validateUserAccess(userId);
         Seller seller = getActiveSellerByUserId(userId);
 
@@ -595,26 +587,20 @@ public class SellerServiceImpl implements SellerService {
     }
 
     private void validateUserAccess(Long requestedUserId) {
-        Long authenticatedUserId = getCurrentUserId();
+        Long authenticatedUserId = getCurrentUserId().getUserId();
         if (!requestedUserId.equals(authenticatedUserId)) {
             throw new ApiException(messageService.get(MessageKeys.ERROR_ACCESS_DENIED), 403);
         }
     }
 
-    private Long getCurrentUserId() {
-        try {
-            Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
-            if (authentication != null && authentication.getPrincipal() instanceof CustomUserDetails) {
-                CustomUserDetails userDetails = (CustomUserDetails) authentication.getPrincipal();
-                return userDetails.getUserId();
-            }
-            throw new ApiException(messageService.get(MessageKeys.AUTH_USER_NOT_AUTHENTICATED), 401);
-        } catch (Exception e) {
-            if (e instanceof ApiException) {
-                throw e;
-            }
+    private CustomUserDetails getCurrentUserId() {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+
+        if (auth == null || !(auth.getPrincipal() instanceof CustomUserDetails user)) {
             throw new ApiException(messageService.get(MessageKeys.AUTH_USER_NOT_AUTHENTICATED), 401);
         }
+
+        return user;
     }
 
     private void validateSellerRole() {
@@ -643,7 +629,7 @@ public class SellerServiceImpl implements SellerService {
 
     private String saveProductImage(Long userId, Long productId, int variationNumber, MultipartFile file) {
         try {
-            Long authenticatedUserId = getCurrentUserId();
+            Long authenticatedUserId = getCurrentUserId().getUserId();
             if (!userId.equals(authenticatedUserId)) {
                 throw new ApiException(MessageKeys.ERROR_ACCESS_DENIED, 403);
             }
