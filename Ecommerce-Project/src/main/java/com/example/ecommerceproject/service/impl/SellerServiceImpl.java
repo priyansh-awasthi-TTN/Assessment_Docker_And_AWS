@@ -1,5 +1,6 @@
 package com.example.ecommerceproject.service.impl;
 
+import com.example.ecommerceproject.entity.*;
 import com.example.ecommerceproject.repository.*;
 
 import static lombok.AccessLevel.PRIVATE;
@@ -47,13 +48,6 @@ import com.example.ecommerceproject.dto.ProductVariationUpdateRequest;
 import com.example.ecommerceproject.dto.SellerCategoryResponseDTO;
 import com.example.ecommerceproject.dto.SellerProfileResponseDTO;
 import com.example.ecommerceproject.dto.SellerProfileUpdateRequestDTO;
-import com.example.ecommerceproject.entity.Address;
-import com.example.ecommerceproject.entity.Category;
-import com.example.ecommerceproject.entity.CategoryMetadataFieldValues;
-import com.example.ecommerceproject.entity.Product;
-import com.example.ecommerceproject.entity.ProductVariations;
-import com.example.ecommerceproject.entity.Seller;
-import com.example.ecommerceproject.entity.User;
 import com.example.ecommerceproject.exception.ApiException;
 import com.example.ecommerceproject.service.EmailService;
 import com.example.ecommerceproject.service.MessageService;
@@ -111,7 +105,7 @@ public class SellerServiceImpl implements SellerService {
         modelMapper.map(user, response);
         modelMapper.map(address, response);
         response.setId(user.getId());
-        response.setImage(computeImageUrl(user.getId(), seller));
+        response.setImage(computeImageUrl(user.getId()));
         response.setAddressId(address.getId());
 
         return response;
@@ -571,44 +565,27 @@ public class SellerServiceImpl implements SellerService {
         }
     }
 
-    private String computeImageUrl(Long userId, Seller seller) {
-        try {
-            Path userDir = Paths.get("uploads/users/");
-            if (!Files.exists(userDir)) {
-                return null;
+    private String computeImageUrl(Long userId) {
+        validateUserAccess(userId);
+        Seller seller = getActiveSellerByUserId(userId);
+
+        String[] extensions = {"jpg", "jpeg", "png"};
+
+        for (String ext : extensions) {
+            String key = "users/" + userId + "/profile." + ext;
+
+            try {
+                s3Client.headObject(HeadObjectRequest.builder()
+                        .bucket(bucket)
+                        .key(key)
+                        .build());
+                return key;
+            } catch (S3Exception e) {
+                if (e.statusCode() == 404) continue;
+                throw e;
             }
-
-            Long[] idsToTry = { userId, seller != null ? seller.getId() : null };
-
-            for (Long id : idsToTry) {
-                if (id == null)
-                    continue;
-
-                String imageUrl = findImageForId(id);
-                if (imageUrl != null) {
-                    return imageUrl;
-                }
-            }
-
-            return null;
-        } catch (Exception e) {
-            return null;
         }
-    }
-
-    private String findImageForId(Long id) {
-        try {
-            Path userDir = Paths.get("uploads/users/");
-            for (String extension : Arrays.asList("jpg", "jpeg", "png")) {
-                Path imagePath = userDir.resolve(id + "." + extension);
-                if (Files.exists(imagePath)) {
-                    return "/api/user/" + id + "/image/" + id + "." + extension;
-                }
-            }
-            return null;
-        } catch (Exception e) {
-            return null;
-        }
+        return null;
     }
 
     private void validateSellerAddressLabel(AddressType label) {
